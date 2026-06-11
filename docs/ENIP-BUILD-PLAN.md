@@ -100,7 +100,8 @@ designed now leave room for them.
 
 ```
 src/utils/
-  platform.h / platform.c        sockets, mutex, time (M0)
+  socket.h / socket.c            TCP sockets only — no other HAL code (M0)
+  platform.h / platform.c        mutex, monotonic time (M0); thread + wake (M6)
 
 src/lib/
   api/
@@ -131,16 +132,17 @@ src/lib/
 
 `src/lib/CMakeLists.txt` already globs `*.c` recursively, so new files under
 `src/lib/` are picked up automatically. `src/utils/CMakeLists.txt` lists files
-explicitly — add `platform.c` there.
+explicitly — add `socket.c` and `platform.c` there.
 
 ---
 
 ## 5. Core scaffolding (M0)
 
-### 5.1 `src/utils/platform.h` / `.c`
+### 5.1 `src/utils/socket.h` / `.c`
 
-Cross-platform TCP + sync primitives. Blocking I/O for now; the wake/event
-construct for async (M6) is noted but not built yet.
+Cross-platform TCP only. This file contains **no** other HAL code (no mutex, no
+time, no threads) — just sockets. Blocking I/O for now; the readiness/wake
+plumbing for async (M6) lands here later alongside the same socket type.
 
 ```c
 #if defined(_WIN32) || defined(_WIN64)
@@ -151,7 +153,10 @@ typedef int socket_t;
 #define PLC_INVALID_SOCKET (-1)
 #endif
 
-/* --- TCP --- */
+/* One-time process init/teardown (WSAStartup on Windows; no-op elsewhere). */
+plc_status_t socket_lib_init(void);
+void         socket_lib_term(void);
+
 /* Open a TCP socket (not yet connected). Returns the socket in *out. */
 plc_status_t socket_tcp_open(socket_t *out);
 
@@ -166,23 +171,27 @@ plc_status_t socket_read_n(socket_t s, uint8_t *buf, size_t len, size_t *got, in
 
 /* Close and invalidate. */
 void socket_close(socket_t s);
+```
 
-/* One-time process init/teardown (WSAStartup on Windows; no-op elsewhere). */
-plc_status_t socket_lib_init(void);
-void socket_lib_term(void);
+### 5.2 `src/utils/platform.h` / `.c`
 
+The rest of the host abstraction — sync primitives and time. **No socket code
+here.** (The `debug.c` lock/time helpers can migrate here once this exists, so
+there is a single HAL home for them.)
+
+```c
 /* --- Mutex --- */
 typedef struct plc_mutex_t plc_mutex_t;   /* opaque; SRWLOCK / pthread_mutex inside */
 plc_status_t plc_mutex_init(plc_mutex_t *m);
-void plc_mutex_lock(plc_mutex_t *m);
-void plc_mutex_unlock(plc_mutex_t *m);
-void plc_mutex_destroy(plc_mutex_t *m);
+void         plc_mutex_lock(plc_mutex_t *m);
+void         plc_mutex_unlock(plc_mutex_t *m);
+void         plc_mutex_destroy(plc_mutex_t *m);
 
 /* --- Time --- */
 int64_t time_ms(void);   /* monotonic milliseconds for timeouts */
 ```
 
-### 5.2 `core/attr.h` / `.c`
+### 5.3 `core/attr.h` / `.c`
 
 Parse the `plc_open` connection string into typed attributes. Accept the
 libplctag-style `key=value&key=value` form, e.g.
@@ -204,7 +213,7 @@ void plc_attr_free(plc_attr_t *a);
 Keys consumed at this stage: `protocol`/`scheme` (driver selection), `gateway`
 (host), `port` (default 44818), `path` (CIP route segments to the CPU).
 
-### 5.3 `core/handle.h` / `.c`
+### 5.4 `core/handle.h` / `.c`
 
 Generational handle table. `plc_dev_handle_t` packs an index + generation so a
 stale handle never resolves to a reused slot (ABA-safe). Resolution takes a
@@ -228,7 +237,7 @@ void              handle_release(plc_device_t *dev);
 plc_status_t      handle_close(plc_dev_handle_t h);
 ```
 
-### 5.4 `core/device.h` / `.c`
+### 5.5 `core/device.h` / `.c`
 
 ```c
 struct plc_device_t {
@@ -252,7 +261,7 @@ void plc_device_destroy(plc_device_t *dev);
 void plc_device_set_error(plc_device_t *dev, plc_status_t status, const char *fmt, ...);
 ```
 
-### 5.5 `core/value.h` / `.c`
+### 5.6 `core/value.h` / `.c`
 
 ```c
 typedef struct {
@@ -273,7 +282,7 @@ int64_t value_int_sentinel(void);
 double  value_double_sentinel(void);
 ```
 
-### 5.6 `protocol/driver.h`
+### 5.7 `protocol/driver.h`
 
 The protocol vtable. Implemented per scheme.
 
@@ -298,7 +307,7 @@ typedef struct plc_driver_vtable_t {
 } plc_driver_vtable_t;
 ```
 
-### 5.7 `protocol/driver_registry.h` / `.c`
+### 5.8 `protocol/driver_registry.h` / `.c`
 
 ```c
 /* Look up a driver by scheme. Returns NULL if unknown. No branching in callers:
@@ -310,7 +319,7 @@ The registry is a static array of `&eip_driver_vtable` (and later
 `&modbus_driver_vtable`). `protocol/eip/eip_driver.c` exports
 `const plc_driver_vtable_t eip_driver_vtable`.
 
-### 5.8 `api/api.c`
+### 5.9 `api/api.c`
 
 Each public function: validate args → `handle_acquire` → lock device → reset
 scratch → delegate to driver vtable → unlock → `handle_release`. M0 wires
@@ -738,9 +747,10 @@ lifetime, so repeat resolutions are pure cache walks.
 
 ## 12. CMake changes
 
-- `src/utils/CMakeLists.txt`: add `platform.c` to the `plctag2_utils` sources.
-  Add `ws2_32` link on Windows for the socket code (the lib already links it; the
-  util lib needs it too for the socket symbols, or keep sockets in `src/lib`).
+- `src/utils/CMakeLists.txt`: add `socket.c` and `platform.c` to the
+  `plctag2_utils` sources (two separate files — sockets are not mixed with the
+  rest of the HAL). On Windows, link `ws2_32` to `plctag2_utils` so the socket
+  symbols resolve in the util library itself.
 - `src/lib/CMakeLists.txt`: no change needed — `GLOB_RECURSE *.c` already picks up
   `api/`, `core/`, `protocol/**`. (Re-run CMake after adding files so the glob is
   re-evaluated.)
@@ -773,7 +783,7 @@ Captured byte vectors for unit tests can be lifted from the
   decode_value`; bit access is read-modify-write of the containing element;
   `value.c` does range-checked conversions and sentinel handling.
 - **Async + threading (M6):** per-connection background thread owning the socket,
-  a request queue, `socket_wait_event`/wake-pipe in `platform.c`, staged ops on
+  a request queue, `socket_wait_event`/wake-pipe in `socket.c`, staged ops on
   `timeout == 0`, and `plc_poll_events`. The synchronous M1–M5 code becomes the
   body the worker thread runs; the `api_mutex`/refcount/handle design already
   isolates callers from the worker.

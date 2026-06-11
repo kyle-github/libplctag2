@@ -21,11 +21,6 @@ endif()
 
 target_link_libraries(plctag2 PRIVATE plctag2_utils)
 
-if(WIN32)
-    target_link_libraries(plctag2 PRIVATE ws2_32)
-elseif(UNIX AND NOT APPLE)
-    target_link_libraries(plctag2 PRIVATE pthread)
-endif()
 
 plctag_set_compiler_options(plctag2)
 

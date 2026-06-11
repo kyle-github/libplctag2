@@ -27,6 +27,7 @@
  *   SOFTWARE.                                                             *
  ***************************************************************************/
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
 
@@ -80,44 +81,72 @@ typedef enum plc_value_type_t {
     PLC_VAL_BYTES,
 } plc_value_type_t;
 
-/* ---- Bytes value ---- */
-typedef struct plc_bytes_t {
-    const uint8_t *data;
-    size_t         len;
-} plc_bytes_t;
+/* ---- Device open/close/status ---- */
+PLCTAG_API plc_dev_handle_t plc_open  (const char *connect_str, int timeout_ms);
+PLCTAG_API plc_status_t     plc_close (plc_dev_handle_t dev);
+PLCTAG_API plc_status_t     plc_status(plc_dev_handle_t dev); /* PLC_STATUS_CONN_* */
 
-/* ---- Device open/close ---- */
-PLCTAG_API plc_dev_handle_t plc_open(const char *connect_str, int timeout_ms);
-PLCTAG_API plc_status_t     plc_close(plc_dev_handle_t dev);
-
-/* ---- Path introspection ---- */
-PLCTAG_API plc_status_t     plc_get_type(plc_dev_handle_t dev, const char *path, int index, int timeout_ms, plc_value_type_t *out_type);
-PLCTAG_API plc_status_t     plc_get_child_count(plc_dev_handle_t dev, const char *path, int timeout_ms, int *out_count);
-PLCTAG_API char            *plc_get_path(plc_dev_handle_t dev, const char *path, int index);
-
-/* ---- Reads ---- */
-PLCTAG_API int64_t          plc_read_int(plc_dev_handle_t dev, const char *path, int index, int timeout_ms);
-PLCTAG_API double           plc_read_double(plc_dev_handle_t dev, const char *path, int index, int timeout_ms);
-PLCTAG_API int              plc_read_bool(plc_dev_handle_t dev, const char *path, int index, int timeout_ms);
-PLCTAG_API const char      *plc_read_string(plc_dev_handle_t dev, const char *path, int index, int timeout_ms);
-PLCTAG_API plc_bytes_t      plc_read_bytes(plc_dev_handle_t dev, const char *path, int index, int timeout_ms);
-
-/* ---- Writes ---- */
-PLCTAG_API plc_status_t     plc_write_int(plc_dev_handle_t dev, const char *path, int index, int timeout_ms, int64_t value);
-PLCTAG_API plc_status_t     plc_write_double(plc_dev_handle_t dev, const char *path, int index, int timeout_ms, double value);
-PLCTAG_API plc_status_t     plc_write_bool(plc_dev_handle_t dev, const char *path, int index, int timeout_ms, int value);
-PLCTAG_API plc_status_t     plc_write_string(plc_dev_handle_t dev, const char *path, int index, int timeout_ms, const char *value);
-PLCTAG_API plc_status_t     plc_write_bytes(plc_dev_handle_t dev, const char *path, int index, int timeout_ms, plc_bytes_t value);
-
-/* ---- Async status poll ---- */
-PLCTAG_API plc_status_t     plc_get_status(plc_dev_handle_t dev, const char *path, int index);
+/* Connection state codes returned by plc_status() and device events. */
+#define PLC_STATUS_CONN_UP             100
+#define PLC_STATUS_CONN_DOWN           101
+#define PLC_STATUS_CONN_DISCONNECTING  102
+#define PLC_STATUS_CONN_CONNECTING     103
+#define PLC_STATUS_CONN_IDLE_WAIT      104
+#define PLC_STATUS_CONN_ERR_WAIT       105
 
 /* ---- Memory management ---- */
-PLCTAG_API void             plc_free(void *ptr);
+PLCTAG_API void plc_free(void *ptr); /* free anything returned with explicit ownership */
+
+/* ---- Metadata / enumeration (M6) ---- */
+PLCTAG_API size_t          plc_get_count(plc_dev_handle_t dev, const char *path, int index, int timeout_ms); /* child count; 0 = scalar */
+PLCTAG_API plc_value_type_t plc_get_type (plc_dev_handle_t dev, const char *path, int index, int timeout_ms);
+PLCTAG_API size_t          plc_get_size (plc_dev_handle_t dev, const char *path, int index, int timeout_ms); /* element bytes; 0 = unknown */
+PLCTAG_API plc_status_t    plc_get_name (plc_dev_handle_t dev, const char *path, int index,
+                                          char *buf, size_t buf_len,
+                                          int timeout_ms); /* NULL name (array elem) => buf[0]='\0', returns OK */
+PLCTAG_API char           *plc_get_path (plc_dev_handle_t dev, const char *path, int index, int timeout_ms); /* caller frees via plc_free */
+
+/* ---- Reads ---- */
+PLCTAG_API int64_t      plc_read_int   (plc_dev_handle_t dev, const char *path, int index, int timeout_ms); /* INT64_MIN on error */
+PLCTAG_API double       plc_read_double(plc_dev_handle_t dev, const char *path, int index, int timeout_ms); /* NAN on error       */
+PLCTAG_API bool         plc_read_bool  (plc_dev_handle_t dev, const char *path, int index, int timeout_ms); /* false on error     */
+PLCTAG_API plc_status_t plc_read_string(plc_dev_handle_t dev, const char *path, int index,
+                                         char *buf, size_t buf_len, size_t *actual_len,
+                                         int timeout_ms);
+PLCTAG_API plc_status_t plc_read_bytes (plc_dev_handle_t dev, const char *path, int index,
+                                         uint8_t *buf, size_t buf_len, size_t *actual_len,
+                                         int timeout_ms);
+
+/* ---- Writes ---- */
+PLCTAG_API plc_status_t plc_write_int   (plc_dev_handle_t dev, const char *path, int index, int64_t v,       int timeout_ms);
+PLCTAG_API plc_status_t plc_write_double(plc_dev_handle_t dev, const char *path, int index, double  v,       int timeout_ms);
+PLCTAG_API plc_status_t plc_write_bool  (plc_dev_handle_t dev, const char *path, int index, bool    v,       int timeout_ms);
+PLCTAG_API plc_status_t plc_write_string(plc_dev_handle_t dev, const char *path, int index, const char *s,   int timeout_ms);
+PLCTAG_API plc_status_t plc_write_bytes (plc_dev_handle_t dev, const char *path, int index,
+                                          const uint8_t *b, size_t len,           int timeout_ms);
+
+/* ---- Flush staged (timeout == 0) reads and writes (M7) ---- */
+PLCTAG_API plc_status_t plc_flush(plc_dev_handle_t dev, const char *path, int timeout_ms);
+
+/* ---- Subscriptions (M8) ---- */
+PLCTAG_API plc_status_t plc_subscribe  (plc_dev_handle_t dev, const char *path, int read_interval_ms);
+PLCTAG_API plc_status_t plc_unsubscribe(plc_dev_handle_t dev, const char *path);
+
+/* ---- Events (M8) ---- */
+typedef struct {
+    char             path[256]; /* "" = device/connection event */
+    int              index;
+    plc_value_type_t type;
+    plc_status_t     status;
+} plc_event_t;
+
+/* Drain pending events; returns event count (0 = timeout), -1 = error. */
+PLCTAG_API int plc_poll_events(plc_dev_handle_t dev, plc_event_t *events,
+                                size_t max_events, int timeout_ms);
 
 /* ---- Diagnostics ---- */
-PLCTAG_API plc_status_t     plc_get_last_error(plc_dev_handle_t dev, char *buf, size_t buf_len);
-PLCTAG_API const char      *plc_status_str(plc_status_t status);
+PLCTAG_API plc_status_t plc_get_last_error(plc_dev_handle_t dev, char *buf, size_t buf_len);
+PLCTAG_API const char  *plc_status_str(plc_status_t status);
 
 #ifdef __cplusplus
 }
